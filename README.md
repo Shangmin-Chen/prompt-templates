@@ -1,2 +1,2 @@
 # prompt-templates
-prompting templates by simon 
+collection of prompt templates by simon 
