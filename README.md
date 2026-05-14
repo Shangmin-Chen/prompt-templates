@@ -17,22 +17,22 @@ you describe your actual task.
 
 ## `claude-context.md` — multi-phase pair programming
 
-A working protocol for using Claude (chat) and Cursor (executor) as
-pair programmers across multiple phases. Built around the idea that
-risky mechanical work is best done in chunks with human checkpoints
-between them.
+A protocol for using Claude (chat) and Cursor (executor) as pair
+programmers across multiple phases. Built around the idea that risky
+mechanical work is best done in chunks with human checkpoints between
+them.
 
 ### Shape
 
-- **Phase 1a (Discovery):** Claude writes a read-only Cursor prompt that
-  explores the codebase and reports back structured context.
+- **Phase 1a (Discovery):** Claude writes a read-only Cursor prompt
+  that explores the codebase and reports back structured context.
 - **Phase 1b (Targeted follow-ups):** Chat-only clarifications and
   decisions, no new agent runs.
 - **Phase 1c (Plan):** Claude proposes a plan, you approve or amend.
 - **Phase 2 (Execution):** Claude writes a Cursor prompt with hard
-  rules, pre-flight checks, recovery commands, and **pause points after
-  every chunk**. You review each chunk's report before approving the
-  next.
+  rules, pre-flight checks, recovery commands, and **pause points
+  after every chunk**. You review each chunk's report before
+  approving the next.
 
 The defining feature is the pause-and-report rhythm during execution.
 You stay in the loop continuously, the agent doesn't autonomously run
@@ -40,7 +40,7 @@ past checkpoints, and you can pivot or retreat at any chunk boundary.
 
 ### How to use it
 
-Paste as message 1, then immediately follow with your actual task in
+Paste as message 1, then immediately follow with your task in
 message 2:
 
 ```text
@@ -50,18 +50,13 @@ I have a migration that needs to roll out to 3 environments and I'm
 worried about ordering. Here's the situation: ...
 ```
 
-The context prompt establishes the working style. Your task
-description supplies the situation. From there, the new chat should
-naturally drop into diagnostic-first mode.
-
 ### What it captures
 
 - The two-phase shape (Phase 1 with Claude, Phase 2 with Cursor)
 - Diagnostic-first instinct — ask for command output before proposing
   fixes
-- Specific patterns — "run these, paste output, then we'll know X"
-- Agent prompt template with all the structural pieces (pre-flight,
-  hard rules, recovery, pause points)
+- Agent prompt template with pre-flight, hard rules, recovery, pause
+  points
 - Multi-agent specifics — main thread mutates, subagents verify in
   parallel
 - How to handle agent reports — read carefully, distinguish real
@@ -81,82 +76,126 @@ naturally drop into diagnostic-first mode.
 ## `claude-gemini-cursor-protocol.md` — one-shot implementation
 
 A four-role handoff protocol for tasks that should land as a single
-diff. Trades the per-chunk human pause points for an **independent
-reviewer (Gemini CLI)** that gates execution — and post-execution
-conformance verification.
+diff. Trades per-chunk human pause points for an **independent
+reviewer (Gemini CLI)** that gates execution and reviews the diff
+afterward.
 
 ### Roles
 
 | Role | Tool | Job |
 |---|---|---|
-| Thinker | Claude (chat) | Writes prompts for the other three, interprets every artifact, decides next move |
-| Auditor / Reviewer | Gemini CLI | Grounds Claude in the codebase, reviews the plan before execution, reviews the diff after |
+| Thinker | Claude (chat) | Writes prompts for the other three, interprets every artifact, triages reviewer rejections |
+| Auditor / Reviewer | Gemini CLI | Grounds Claude with audit, reviews plan, reviews diff. Every verdict binary. |
 | Planner | Cursor (single comprehensive plan) | Produces one complete `planner.md` |
 | Writer | Cursor multi-agent | Executes `planner.md` concurrently, no pauses |
 
+Every prompt Claude writes for an agent opens with a `## Your role`
+block. Each agent only sees the one prompt — so the role is declared
+every time.
+
 ### Shape
 
-The full loop, end to end:
+The full loop:
 
 ```
 Task description in chat
   → Gemini audit (codebase context)
   → Cursor planner produces planner.md
-  → Gemini plan review (APPROVE / REVISE)
-    → REVISE: Claude writes edit prompt, planner revises, re-review
-    → APPROVE: Cursor multi-agent executes
-  → Gemini conformance review (MATCH / SMALL_DRIFT / BIG_DRIFT)
-    → MATCH: done
-    → SMALL_DRIFT: Claude writes fix prompt, executor patches
-    → BIG_DRIFT: git rollback, re-enter planner loop
+  → Gemini plan review (APPROVE / REJECT)
+    → REJECT: Claude writes planner edit prompt, planner revises,
+              re-review
+    → APPROVE: Cursor multi-agent executes, then Gemini conformance
+               review
+  → Gemini conformance review (APPROVE / REJECT)
+    → APPROVE: done. Protocol ends. No paste-back.
+    → REJECT: Claude triages →
+        Path A — Small fix: Claude writes fix prompt + re-review
+                 prompt in one response. Same Cursor context fixes,
+                 Gemini re-reviews.
+        Path B — Rollback: git rollback, fresh Cursor context, new
+                 planner prompt. Loop restarts at planning.
 ```
 
-Two principles do the load-bearing work:
+### Five load-bearing principles
 
 1. **Every agent starts with zero memory of every other agent.** The
-   protocol is a context-relay race. Claude's central job is to be the
-   relay coordinator.
-2. **Executor purity.** The writer is dumb on purpose. Smart logic
-   lives in the planner. If `planner.md` ever asks the executor to
-   "figure out" or "handle appropriately," that's a blocking review
-   issue — even if Gemini missed it.
+   protocol is a context-relay race. Claude is the relay coordinator.
+2. **Executor purity.** The Cursor writer is dumb on purpose. Smart
+   logic lives in the planner. If `planner.md` ever asks the executor
+   to "figure out" or "handle appropriately," that's grounds for
+   REJECT.
+3. **Trust between agents.** No chaperoning. Cursor knows how to
+   write its own files. The user pastes `planner.md` into Gemini
+   directly. No `.agent/` directory ceremony.
+4. **Phases run concurrently by default.** Sequential ordering is
+   the exception and must be justified.
+5. **Reviewers commit. Claude triages.** Gemini returns binary
+   verdicts — APPROVE or REJECT, no hedging. Claude decides what to
+   do on REJECT.
 
 ### How to use it
 
-Same pattern as `claude-context.md` — paste as message 1, follow with
-your task in message 2:
+Same pattern as `claude-context.md`:
 
 ```text
 [paste of claude-gemini-cursor-protocol.md]
 
-I need to add OAuth login (Google + GitHub) to my Next.js app. Currently
-using email+password via Auth.js.
+I need to add OAuth login (Google + GitHub) to my Next.js app.
+Currently using email+password via Auth.js.
 ```
 
-Claude responds with the Gemini audit prompt. You run it, paste the
-report back, and the loop unfolds from there.
+Claude responds with the Gemini audit prompt. You run it in Gemini
+CLI, paste the report back, and the loop unfolds.
 
 ### Human role during the loop
 
-You're watching the whole protocol stream by. There is no dedicated
-"human checkpoint" step — you interject whenever something looks off,
-and Claude folds your note into the artifact currently in flight
-without restarting the loop. The protocol assumes you're ambient.
+You're watching the protocol stream by. There is no dedicated "human
+checkpoint" step — you interject when something looks off, and
+Claude folds your note into the artifact currently in flight without
+restarting the loop. The protocol assumes you're ambient.
+
+### What the conformance review covers
+
+The post-execution review bundles three checks:
+
+- **Plan conformance** — did the executor build what the plan said?
+- **Executor purity in code** — did the executor stay dumb, or did
+  smart logic creep in?
+- **Security and correctness** — injection risks, auth bypasses,
+  logic flaws, missing edge cases.
+
+Plus **task-specific watchpoints** Claude generates from the audit
+and accepted risks. 0-4 sharpened attention items per task.
+
+Any finding worth flagging → REJECT. Gemini doesn't classify the size
+of the remediation. That's Claude's job during triage.
+
+### Triage on conformance REJECT
+
+Claude reads the findings and decides between:
+
+- **Path A — Small fix.** Bounded findings, same executor context can
+  apply the fix. Claude writes two prompts in one response: the fix
+  for Cursor and the re-review for Gemini. You run them in order.
+- **Path B — Rollback.** Structural findings, fix would meaningfully
+  exceed a small prompt, or this is the third REJECT round.
+  `git` rollback, fresh Cursor context, new planner prompt.
+
+Repeated small fixes = the protocol is leaking. Claude should be
+recommending Path B by the third REJECT round.
 
 ### When this is the right tool
 
 - A single feature that lands as one diff
 - A bug fix where the root cause is understood
 - Mechanical refactors with a clear endpoint
-- Anything where the plan can be fully specified up front and the
-  executor doesn't need to make decisions
+- Anything where the plan can be fully specified up front
 
 ### When it's the *wrong* tool
 
-- Exploratory work where you don't know what the right shape is yet
+- Exploratory work where the right shape isn't clear yet
 - Multi-PR stacks
-- Work that should be staged across environments with verification
-  between each stage
+- Work staged across environments with verification between stages
 
 For those, use `claude-context.md`.
 
@@ -164,15 +203,12 @@ For those, use `claude-context.md`.
 
 ## Choosing between them
 
-A rough heuristic:
-
 - If you can describe the end state in one sentence and the diff is
   bounded → `claude-gemini-cursor-protocol.md`.
 - If you'd want to stop and look around after each piece lands →
   `claude-context.md`.
 - If you're not sure → `claude-context.md`. The cost of pausing
-  unnecessarily is lower than the cost of letting an under-specified
-  plan run to completion.
+  unnecessarily is lower than letting an under-specified plan run.
 
 ---
 
@@ -190,13 +226,12 @@ starting points when a task fits a known shape.
 As you do more sessions, you'll probably notice patterns. Consider
 adding:
 
-- Repo-specific conventions (branch naming, commit message scope tags
-  your team uses, CI requirements)
-- Stack-specific knowledge (your TypeScript/Python conventions, what
-  your typecheck/lint scripts are called)
-- Personal preferences that evolved (preferred phase size, how
-  aggressive about subagent parallelism, when you'd want
-  `claude-context.md` over the protocol or vice versa)
+- Repo-specific conventions (branch naming, commit message scope
+  tags, CI requirements)
+- Stack-specific knowledge (TypeScript/Python conventions,
+  typecheck/lint script names)
+- Personal preferences (when to use the protocol vs `claude-context`,
+  watchpoints that show up across most tasks)
 - New protocol variants if you find a workflow shape neither file
   captures
 
